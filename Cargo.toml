@@ -2,5 +2,7 @@
 name = "dldist-file"
 version = "0.1.0"
 edition = "2021"
+description = "eats a text file and compares non-empty lines with each other for Damerau-Levenshtein distances and orders them by the resulting values"
 
 [dependencies]
+clap = { version = "4.5", features = ["derive"] }
