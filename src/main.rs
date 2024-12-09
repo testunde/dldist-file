@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use clap::Parser;
 use num_traits::PrimInt;
@@ -12,6 +13,8 @@ struct DistanceResult {
 }
 
 const NUM_PRINT_ALL: u16 = 0;
+
+static VERBOSE: Mutex<bool> = Mutex::new(false);
 
 /// Returns an Iterator to the Reader of the lines of the file.
 /// Preserves order and count of the raw file lines.
@@ -69,7 +72,10 @@ fn calculate_osa_distance_between_two_strings(str_a: &str, str_b: &str) -> u32 {
         a_prior = a;
     }
 
-    // println!("{}", format!("{:?}", dist).replace("], [", "],\n[")); // print beautified 2D-matrix
+    if *VERBOSE.lock().unwrap() {
+        // print beautified 2D-matrix
+        println!("{}", format!("{:?}", dist).replace("], [", "],\n["));
+    }
 
     return dist[str_a.len()][str_b.len()];
 }
@@ -115,6 +121,10 @@ struct Arguments {
     #[arg(short = 'n', long, default_value_t = 10)]
     n_pairs: u16,
 
+    /// Also print the two lines between which the distance has been calculated as shown in the end result list.
+    #[arg(short = 'p', long)]
+    print_lines: bool,
+
     /// Print additional info
     #[arg(short = 'v', long)]
     verbose: bool,
@@ -124,6 +134,7 @@ struct Arguments {
 fn main() {
     // argument parsing & handling
     let args = Arguments::parse();
+    *VERBOSE.lock().unwrap() = args.verbose;
 
     println!(
         "==> Reading in '{}'...",
@@ -192,5 +203,11 @@ fn main() {
             dr.line_b + 1,
             dr.dldist
         );
+
+        if args.print_lines {
+            println!("{: >4}> {}", dr.line_a + 1, lines[dr.line_a as usize]);
+            println!("{: >4}> {}", dr.line_b + 1, lines[dr.line_b as usize]);
+            println!();
+        }
     }
 }
