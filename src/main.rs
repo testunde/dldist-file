@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::fs::File;
 use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
@@ -9,7 +10,9 @@ use num_traits::PrimInt;
 struct DistanceResult {
     line_a: u32,
     line_b: u32,
+    _mean_line_len: f32,
     dldist: u32,
+    normalized_dldist: f32,
 }
 
 const NUM_PRINT_ALL: u16 = 0;
@@ -94,10 +97,13 @@ fn calculate_osa_distances(lines: &Vec<String>) -> Vec<DistanceResult> {
             }
             let line_b = &lines[lb];
             let distance = calculate_osa_distance_between_two_strings(line_a, line_b);
+            let mean_line_length = ((line_a.len() as f32) + (line_b.len() as f32)) * 0.5f32;
             results.push(DistanceResult {
                 line_a: la as u32,
                 line_b: lb as u32,
+                _mean_line_len: mean_line_length,
                 dldist: distance,
+                normalized_dldist: (distance as f32) / mean_line_length,
             });
         }
     }
@@ -121,6 +127,10 @@ struct Arguments {
     #[arg(short = 'n', long, default_value_t = 10)]
     n_pairs: u16,
 
+    /// Normalizes the resulting distance by the mean lengths of the lines in the pair. This value is used for sorted output instead.
+    #[arg(long)]
+    normalize: bool,
+
     /// Also print the two lines between which the distance has been calculated as shown in the end result list.
     #[arg(short = 'p', long)]
     print_lines: bool,
@@ -128,7 +138,7 @@ struct Arguments {
     /// Print additional info
     #[arg(short = 'v', long)]
     verbose: bool,
-    // TODO: add flag for optional parallelization (and measure execution time)
+    // TODO: add flag for optional parallelization (and measure execution time; test with bulk random-generated lines)
 }
 
 fn main() {
@@ -169,15 +179,32 @@ fn main() {
             combinations_cnt);
     }
     // sort depending on user settings
-    if args.descending {
-        distance_results.sort_by(|a, b| b.dldist.cmp(&a.dldist));
+    if args.normalize {
+        if args.descending {
+            distance_results.sort_by(|a, b| {
+                b.normalized_dldist
+                    .partial_cmp(&a.normalized_dldist)
+                    .unwrap_or(Ordering::Equal)
+            });
+        } else {
+            distance_results.sort_by(|a, b| {
+                a.normalized_dldist
+                    .partial_cmp(&b.normalized_dldist)
+                    .unwrap_or(Ordering::Equal)
+            });
+        }
     } else {
-        distance_results.sort_by(|a, b| a.dldist.cmp(&b.dldist));
+        if args.descending {
+            distance_results.sort_by(|a, b| b.dldist.cmp(&a.dldist));
+        } else {
+            distance_results.sort_by(|a, b| a.dldist.cmp(&b.dldist));
+        }
     }
 
     let print_cnt_limit = combinations_cnt.min(args.n_pairs as u32);
     println!(
-        "==> Printing {} results in {} order:",
+        "==> Printing{} {} results in {} order:",
+        if args.normalize { " normalized" } else { "" },
         if args.n_pairs == NUM_PRINT_ALL {
             format!("all {}", combinations_cnt)
         } else {
@@ -198,10 +225,17 @@ fn main() {
         let dr = &distance_results[i];
         // print padded values
         println!(
-            "Line {: >4} vs. {: >4}: {: >3}",
+            "Line {: >4} vs. {: >4}: {}",
             dr.line_a + 1,
             dr.line_b + 1,
-            dr.dldist
+            if args.normalize {
+                format!(
+                    "norm. {:2.4} (dist. {: >3})",
+                    dr.normalized_dldist, dr.dldist
+                )
+            } else {
+                format!("{: >3}", dr.dldist)
+            }
         );
 
         if args.print_lines {
