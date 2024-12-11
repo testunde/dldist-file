@@ -1,11 +1,15 @@
 use std::cmp::Ordering;
 use std::fs::File;
 use std::io::{self, BufRead};
+use std::num::NonZero;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
+use std::time::Instant;
 
 use clap::Parser;
 use num_traits::PrimInt;
+use threadpool::ThreadPool;
 
 struct DistanceResult {
     line_a: u32,
@@ -16,8 +20,10 @@ struct DistanceResult {
 }
 
 const NUM_PRINT_ALL: u16 = 0;
+const NUM_ALL_THREADS_AVAILBLE: usize = 0;
 
 static VERBOSE: Mutex<bool> = Mutex::new(false);
+static THREAD_NUM: Mutex<usize> = Mutex::new(1);
 
 /// Returns an Iterator to the Reader of the lines of the file.
 /// Preserves order and count of the raw file lines.
@@ -83,32 +89,66 @@ fn calculate_osa_distance_between_two_strings(str_a: &str, str_b: &str) -> u32 {
     return dist[str_a.len()][str_b.len()];
 }
 
+use std::sync::mpsc::channel;
 fn calculate_osa_distances(lines: &Vec<String>) -> Vec<DistanceResult> {
     let lines_cnt = lines.len();
-    let combinations_cnt = pair_combinations_count(lines_cnt as u64);
-    let mut results = Vec::with_capacity(combinations_cnt as usize);
+    // let combinations_cnt = pair_combinations_count(lines_cnt as u64);
+    // let mut results: Vec<DistanceResult> = Vec::with_capacity(combinations_cnt as usize);
 
-    for la in 0..lines_cnt {
-        let line_a = &lines[la];
-        for lb in la..lines_cnt {
-            if la == lb {
-                // ignore self-comparison
-                continue;
+    let pool = ThreadPool::new(*THREAD_NUM.lock().unwrap());
+
+    let rx = {
+        // required so that tx on main thread is dropped and rx.iter() does not block
+        let (tx, rx) = channel::<DistanceResult>();
+
+        // notifying variables to wake up main thread
+        let pair = Arc::new((Mutex::new(()), Condvar::new()));
+        let (lock, cvar) = &*pair;
+
+        for la in 0..lines_cnt {
+            for lb in la..lines_cnt {
+                if la == lb {
+                    // ignore self-comparison
+                    continue;
+                }
+                let line_a = lines[la].clone();
+                let line_b = lines[lb].clone();
+                let tx_child = tx.clone();
+                let pair_child = Arc::clone(&pair);
+                pool.execute(move || {
+                    let distance = calculate_osa_distance_between_two_strings(&line_a, &line_b);
+                    let mean_line_length = ((line_a.len() as f32) + (line_b.len() as f32)) * 0.5f32;
+                    tx_child
+                        .send(DistanceResult {
+                            line_a: la as u32,
+                            line_b: lb as u32,
+                            _mean_line_len: mean_line_length,
+                            dldist: distance,
+                            normalized_dldist: (distance as f32) / mean_line_length,
+                        })
+                        .unwrap();
+
+                    // We notify the condvar that we are done with calculating.
+                    let (lock_child, cvar_child) = &*pair_child;
+                    let _guard = lock_child.lock().unwrap();
+                    cvar_child.notify_one();
+                });
+
+                {
+                    // This prevents from spamming the queue and thus the memory.
+                    // That way it makes sure the current+queued jobs are twice the set thread count.
+                    let mut _guard = lock.lock().unwrap();
+                    while pool.queued_count() >= pool.max_count() {
+                        _guard = cvar.wait(_guard).unwrap();
+                    }
+                }
             }
-            let line_b = &lines[lb];
-            let distance = calculate_osa_distance_between_two_strings(line_a, line_b);
-            let mean_line_length = ((line_a.len() as f32) + (line_b.len() as f32)) * 0.5f32;
-            results.push(DistanceResult {
-                line_a: la as u32,
-                line_b: lb as u32,
-                _mean_line_len: mean_line_length,
-                dldist: distance,
-                normalized_dldist: (distance as f32) / mean_line_length,
-            });
         }
-    }
+        rx
+    };
+    pool.join();
 
-    results
+    rx.iter().collect()
 }
 
 #[derive(Parser)]
@@ -131,6 +171,11 @@ struct Arguments {
     #[arg(long)]
     normalize: bool,
 
+    /// Optionally parallelize the calculations with multiple threads. N=1 means single-threaded.
+    /// Set to N=0 to utilize all-but-one available cores of the running system.
+    #[arg(short = 'j', long, default_value_t = 1usize)]
+    thread_num: usize,
+
     /// Also print the two lines between which the distance has been calculated as shown in the end result list.
     #[arg(short = 'p', long)]
     print_lines: bool,
@@ -138,13 +183,28 @@ struct Arguments {
     /// Print additional info
     #[arg(short = 'v', long)]
     verbose: bool,
-    // TODO: add flag for optional parallelization (and measure execution time; test with bulk random-generated lines)
 }
 
 fn main() {
     // argument parsing & handling
     let args = Arguments::parse();
     *VERBOSE.lock().unwrap() = args.verbose;
+
+    if args.thread_num == NUM_ALL_THREADS_AVAILBLE {
+        let res = thread::available_parallelism();
+        if res.is_err() {
+            println!(
+                "WARN: Could not determine thread count from running system. Setting thread_num=1."
+            )
+        }
+
+        // 2!=0 thus unwrap would not panic
+        *THREAD_NUM.lock().unwrap() =
+            res.unwrap_or(NonZero::<usize>::new(1 + 1).unwrap()).get() - 1;
+    } else {
+        *THREAD_NUM.lock().unwrap() = args.thread_num;
+    }
+    println!("Running with {} threads.", *THREAD_NUM.lock().unwrap());
 
     println!(
         "==> Reading in '{}'...",
@@ -172,12 +232,17 @@ fn main() {
         combinations_cnt, lines_cnt
     );
     // calculate all distances
+    let start_time = Instant::now();
     let mut distance_results = calculate_osa_distances(&lines);
     if distance_results.len() as u32 != combinations_cnt {
         panic!("Somehow the size of the result combinations list ({}) does not equal the theoretical count ({})!?",
             distance_results.len(),
             combinations_cnt);
     }
+    println!(
+        "Calculations done within {:.4}s (without sorting).",
+        start_time.elapsed().as_secs_f32()
+    );
     // sort depending on user settings
     if args.normalize {
         if args.descending {
