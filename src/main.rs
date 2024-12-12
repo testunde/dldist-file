@@ -92,8 +92,6 @@ fn calculate_osa_distance_between_two_strings(str_a: &str, str_b: &str) -> u32 {
 use std::sync::mpsc::channel;
 fn calculate_osa_distances(lines: &Vec<String>) -> Vec<DistanceResult> {
     let lines_cnt = lines.len();
-    // let combinations_cnt = pair_combinations_count(lines_cnt as u64);
-    // let mut results: Vec<DistanceResult> = Vec::with_capacity(combinations_cnt as usize);
 
     let pool = ThreadPool::new(*THREAD_NUM.lock().unwrap());
 
